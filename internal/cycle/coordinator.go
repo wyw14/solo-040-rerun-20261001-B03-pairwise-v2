@@ -80,27 +80,34 @@ func (c *Coordinator) Cancel(ctx context.Context, chamberID, reason string) (mod
 }
 
 func (c *Coordinator) ApplyGateAck(ctx context.Context, ack model.DeviceAck) error {
-	command, err := c.gates.Confirm(ctx, ack)
+	// Validate the receipt against the command record before any state moves:
+	// unknown, mismatched, unsettled or already-terminal (duplicate/cancelled)
+	// commands are rejected without touching command, gate or journal state.
+	command, err := c.gates.ValidateAck(ack)
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	cycleValue, ok := c.current[ack.ChamberID]
 	if !ok || cycleValue.Stage.Terminal() || !cycleValue.IdentityMatches(command.CycleID, command.Generation) {
-		c.mu.Unlock()
 		return errors.New("device acknowledgement belongs to an inactive transit generation")
 	}
 	next, err := nextAfterGate(cycleValue.Stage)
-	if err == nil {
-		err = cycleValue.Advance(next, "matching gate command settled", c.now())
-	}
-	if err == nil {
-		c.current[ack.ChamberID] = cycleValue
-	}
-	c.mu.Unlock()
 	if err != nil {
 		return err
 	}
+	// Every rejection check has passed, so commit command, gate observation
+	// and the transit advance as one step under the coordinator lock. Confirm
+	// re-validates the ack internally, closing the race with an emergency
+	// cancellation that does not take this lock.
+	if _, err := c.gates.Confirm(ctx, ack); err != nil {
+		return err
+	}
+	if err := cycleValue.Advance(next, "matching gate command settled", c.now()); err != nil {
+		return err
+	}
+	c.current[ack.ChamberID] = cycleValue
 	if next == model.StageLeveling {
 		if err := c.hydraulics.BeginLeveling(cycleValue); err != nil {
 			return err

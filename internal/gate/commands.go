@@ -66,9 +66,9 @@ func (c *Commands) transition(commandID uuid.UUID, state model.CommandState, now
 	return nil
 }
 
-func (c *Commands) Settle(ack model.DeviceAck, now time.Time) (model.DeviceCommand, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// checkAckLocked verifies an ack against the stored command without mutating
+// anything. The caller must hold c.mu (read or write).
+func (c *Commands) checkAckLocked(ack model.DeviceAck) (model.DeviceCommand, error) {
 	command, ok := c.byID[ack.CommandID]
 	if !ok {
 		return model.DeviceCommand{}, fmt.Errorf("unknown command %s", ack.CommandID)
@@ -78,6 +78,28 @@ func (c *Commands) Settle(ack model.DeviceAck, now time.Time) (model.DeviceComma
 	}
 	if !ack.Settled {
 		return model.DeviceCommand{}, errors.New("device has not settled")
+	}
+	if command.State.Terminal() {
+		return model.DeviceCommand{}, fmt.Errorf("command %s is already terminal", command.ID)
+	}
+	return command, nil
+}
+
+// ValidateAck checks an ack against the command record without changing any
+// state, so callers can reject stale, terminal or duplicate receipts before
+// committing anything.
+func (c *Commands) ValidateAck(ack model.DeviceAck) (model.DeviceCommand, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.checkAckLocked(ack)
+}
+
+func (c *Commands) Settle(ack model.DeviceAck, now time.Time) (model.DeviceCommand, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	command, err := c.checkAckLocked(ack)
+	if err != nil {
+		return model.DeviceCommand{}, err
 	}
 	if err := command.SetState(model.CommandSettled, now); err != nil {
 		return model.DeviceCommand{}, err

@@ -49,6 +49,13 @@ func (c *Controller) Request(ctx context.Context, cycle model.TransitCycle, dire
 	return command, err
 }
 
+// ValidateAck checks a device ack against the command record without
+// changing command, gate or journal state, so stale or duplicate receipts
+// can be rejected before anything is committed.
+func (c *Controller) ValidateAck(ack model.DeviceAck) (model.DeviceCommand, error) {
+	return c.commands.ValidateAck(ack)
+}
+
 func (c *Controller) Confirm(ctx context.Context, ack model.DeviceAck) (model.DeviceCommand, error) {
 	command, err := c.commands.Settle(ack, c.now())
 	if err != nil {
